@@ -847,17 +847,23 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
                 plt.figure(figsize=(12, 4))
 
                 plt.subplot(1, 3, 1)
-                plt.title("High-Resolution Ground Truth")
+                plt.title(
+                    f"High-Resolution Ground Truth\nSize: ({hr_image.size[0]}x{hr_image.size[1]})"
+                )
                 plt.imshow(hr_image)
                 plt.axis("off")
 
                 plt.subplot(1, 3, 2)
-                plt.title("Low-Resolution Input")
+                plt.title(
+                    f"Low-Resolution Input\nSize: ({lr_image.size[0]}x{lr_image.size[1]})"
+                )
                 plt.imshow(lr_image)
                 plt.axis("off")
 
                 plt.subplot(1, 3, 3)
-                plt.title("Super-Resolution Output")
+                plt.title(
+                    f"Super-Resolution Output\nSize: ({sr_image.size[0]}x{sr_image.size[1]})"
+                )
                 plt.imshow(sr_image)
                 plt.axis("off")
 

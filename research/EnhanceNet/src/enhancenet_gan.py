@@ -10,8 +10,15 @@ from torchvision import transforms
 from tqdm import tqdm
 from PIL import Image
 import os
+from pathlib import Path
 import torch
 from torch.utils.data import Dataset
+
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF
+from skimage.metrics import structural_similarity as ssim
+
+from evaluation_metrics import calculate_lpips
 
 
 class DIV2KDataset(Dataset):
@@ -37,24 +44,19 @@ class DIV2KDataset(Dataset):
 
 
 class ResidualBlock(nn.Module):
-    """
-    Residual block for the convolutional part of the network
-    """
-
     def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
+        self.in1 = nn.InstanceNorm2d(channels)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.in2 = nn.InstanceNorm2d(channels)
 
     def forward(self, x):
         residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.relu(self.in1(self.conv1(x)))
+        out = self.in2(self.conv2(out))
         out += residual
-        out = self.relu(out)
         return out
 
 
@@ -96,7 +98,7 @@ class EnhanceNetBase(nn.Module):
 
         # Residual blocks for local feature extraction
         self.residual_blocks = nn.Sequential(
-            *[ResidualBlock(feature_channels) for _ in range(4)]  # 4 residual blocks
+            *[ResidualBlock(feature_channels) for _ in range(8)]  # 8 residual blocks
         )
 
         # Upsampling layers
@@ -106,6 +108,11 @@ class EnhanceNetBase(nn.Module):
             self.upsampler.add_module(
                 f"upsample_{_}", PixelShuffleUpsampler(feature_channels, scale_factor=2)
             )
+
+        # Projection layer to match input channels to feature channels
+        self.input_projection = nn.Conv2d(
+            in_channels, feature_channels, kernel_size=3, padding=1
+        )
 
         # Final output layer
         self.final = nn.Conv2d(feature_channels, out_channels, kernel_size=3, padding=1)
@@ -134,8 +141,18 @@ class EnhanceNetBase(nn.Module):
         # Upsampling
         upsampled = self.upsampler(res_features)
 
-        # Final output
-        output = self.final(upsampled).clamp(0, 1)  # Clamp output to [0, 1]
+        # Upsample the input to match the size of the upsampled tensor
+        x_upsampled = F.interpolate(
+            x, size=upsampled.shape[-2:], mode="bicubic", align_corners=False
+        )
+
+        # Project input channels to match feature channels
+        x_projected = self.input_projection(x_upsampled)
+
+        # Add skip connection from input to output
+        output = self.final(upsampled + x_projected).clamp(
+            0, 1
+        )  # Clamp output to [0, 1]
         return output
 
 
@@ -163,10 +180,7 @@ class Discriminator(nn.Module):
             *discriminator_block(64, 64, stride=2),
             *discriminator_block(64, 128, stride=1),
             *discriminator_block(128, 128, stride=2),
-            *discriminator_block(128, 256, stride=1),
-            *discriminator_block(256, 256, stride=2),
-            *discriminator_block(256, 512, stride=1),
-            *discriminator_block(512, 512, stride=2),
+            *discriminator_block(128, 256, stride=1),  # Removed deeper blocks
         )
 
         # Global average pooling
@@ -174,9 +188,9 @@ class Discriminator(nn.Module):
 
         # Fully connected layers
         self.fc = nn.Sequential(
-            nn.Linear(512, 1024),
+            nn.Linear(256, 512),  # Adjust input size to match the reduced model
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1),
+            nn.Linear(512, 1),
         )
 
     def forward(self, x):
@@ -231,6 +245,120 @@ class VGGPerceptualLoss(nn.Module):
         return features
 
 
+def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualizations=5):
+    """
+    Test the EnhanceNet GAN model and visualize results.
+
+    Args:
+        generator (nn.Module): The trained EnhanceNet generator model.
+        test_loader (DataLoader): DataLoader for the test dataset (provides only HR images).
+        device (str): Device to run the model on ("cuda" or "cpu").
+        num_visualizations (int): Number of images to visualize.
+    """
+    generator.eval()  # Set the generator to evaluation mode
+    generator.to(device)
+
+    total_psnr_sr = 0
+    total_psnr_lr = 0
+    total_ssim_sr = 0
+    total_samples = 0
+    visualized = 0
+
+    with torch.no_grad():
+        for hr_images in tqdm(test_loader, desc="Testing"):
+            hr_images = hr_images.to(device)
+
+            # Create low-resolution images dynamically
+            lr_images = F.interpolate(
+                hr_images, size=(128, 128), mode="bicubic", align_corners=False
+            )
+
+            # Generate super-resolution images
+            sr_images = generator(lr_images)
+
+            # Upsample LR images back to HR size for comparison
+            lr_upsampled = F.interpolate(
+                lr_images,
+                size=hr_images.shape[-2:],
+                mode="bicubic",
+                align_corners=False,
+            )
+
+            # Calculate PSNR for SR images
+            mse_sr = F.mse_loss(sr_images, hr_images)
+            psnr_sr = 10 * torch.log10(1.0 / mse_sr)
+            total_psnr_sr += psnr_sr.item() * hr_images.size(0)
+
+            # Calculate PSNR for LR images (upsampled)
+            mse_lr = F.mse_loss(lr_upsampled, hr_images)
+            psnr_lr = 10 * torch.log10(1.0 / mse_lr)
+            total_psnr_lr += psnr_lr.item() * hr_images.size(0)
+
+            total_samples += hr_images.size(0)
+
+            # Calculate SSIM for SR images
+            sr_image_np = sr_images[0].cpu().numpy().transpose(1, 2, 0)
+            hr_image_np = hr_images[0].cpu().numpy().transpose(1, 2, 0)
+            ssim_score = ssim(
+                sr_image_np, hr_image_np, multichannel=True, win_size=3, data_range=1.0
+            )  # Specify data_range=1.0
+            total_ssim_sr += ssim_score
+            # print(f"SSIM: {ssim_score:.4f}")
+
+            # Visualize results
+            if visualized < num_visualizations:
+
+                lr_image = TF.to_pil_image(lr_images[0].cpu().clamp(0, 1))
+                hr_image = TF.to_pil_image(hr_images[0].cpu().clamp(0, 1))
+                sr_image = TF.to_pil_image(sr_images[0].cpu().clamp(0, 1))
+
+                upscaled_lr = F.interpolate(
+                    lr_images[0].cpu().unsqueeze(0),
+                    size=(512, 512),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+                lr_lpips_score = calculate_lpips(upscaled_lr, hr_images[0].cpu())
+                sr_lpips_score = calculate_lpips(sr_images[0].cpu(), hr_images[0].cpu())
+                print(f"LPIPS: {lr_lpips_score:.4f} --> {sr_lpips_score:.4f}")
+                print(psnr_lr, "->", psnr_sr)
+
+                plt.figure(figsize=(12, 4))
+
+                plt.subplot(1, 3, 1)
+                plt.title(
+                    f"High-Resolution Ground Truth\nSize: {hr_image.size[0]}x{hr_image.size[1]}"
+                )
+                plt.imshow(hr_image)
+                plt.axis("off")
+
+                plt.subplot(1, 3, 2)
+                plt.title(
+                    f"Low-Resolution Input\nSize: {lr_image.size[0]}x{lr_image.size[1]}"
+                )
+                plt.imshow(lr_image)
+                plt.axis("off")
+
+                plt.subplot(1, 3, 3)
+                plt.title(
+                    f"Super-Resolution Output\nSize: {sr_image.size[0]}x{sr_image.size[1]}"
+                )
+                plt.imshow(sr_image)
+                plt.axis("off")
+
+                plt.show()
+                visualized += 1
+
+    # Calculate average PSNR and SSIM
+    avg_psnr_sr = total_psnr_sr / total_samples if total_samples > 0 else 0.0
+    avg_psnr_lr = total_psnr_lr / total_samples if total_samples > 0 else 0.0
+    avg_ssim_sr = total_ssim_sr / total_samples if total_samples > 0 else 0.0
+    print(f"Average PSNR (Super-Resolution): {avg_psnr_sr:.2f} dB")
+    print(f"Average PSNR (Low-Resolution Upsampled): {avg_psnr_lr:.2f} dB")
+    print(f"Average SSIM (Super-Resolution): {avg_ssim_sr:.4f}")
+
+
 class EnhanceNetTrainer:
     """
     Trainer for EnhanceNet model with perceptual and adversarial losses
@@ -248,16 +376,19 @@ class EnhanceNetTrainer:
 
         # Optimizers
         self.generator_optimizer = torch.optim.Adam(
-            self.generator.parameters(), lr=1e-4, betas=(0.9, 0.999)
+            self.generator.parameters(), lr=2e-4, betas=(0.5, 0.999)
         )
         self.discriminator_optimizer = torch.optim.Adam(
-            self.discriminator.parameters(), lr=1e-4, betas=(0.9, 0.999)
+            self.discriminator.parameters(), lr=1e-6, betas=(0.5, 0.999)
         )
 
         # Loss weights
         self.content_weight = 1.0
-        self.perceptual_weight = 0.1
-        self.adversarial_weight = 0.001
+        self.perceptual_weight = 0.05
+        self.adversarial_weight = 0.0001
+
+        # Gradient scaler for mixed precision training
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def train_batch(self, lr_images, hr_images):
         """
@@ -276,11 +407,18 @@ class EnhanceNetTrainer:
         # Train discriminator
         self.discriminator_optimizer.zero_grad()
 
+        hr_images = (
+            hr_images + torch.randn_like(hr_images) * 0.01
+        )  # Add noise to real images
+        sr_images = (
+            sr_images + torch.randn_like(sr_images) * 0.01
+        )  # Add noise to fake images
+
         real_preds = self.discriminator(hr_images)
         fake_preds = self.discriminator(sr_images.detach())
 
-        real_labels = torch.ones_like(real_preds)
-        fake_labels = torch.zeros_like(fake_preds)
+        real_labels = torch.ones_like(real_preds) * 0.9
+        fake_labels = torch.zeros_like(fake_preds) * 0.1
 
         d_real_loss = self.adversarial_loss(real_preds, real_labels)
         d_fake_loss = self.adversarial_loss(fake_preds, fake_labels)
@@ -292,22 +430,25 @@ class EnhanceNetTrainer:
         # Train generator
         self.generator_optimizer.zero_grad()
 
-        # Recalculate fake predictions for generator
-        fake_preds = self.discriminator(sr_images)
-
-        # Calculate losses
-        content_loss = self.content_loss(sr_images, hr_images)
-        perceptual_loss = self.perceptual_loss(sr_images, hr_images)
-        adversarial_loss = self.adversarial_loss(fake_preds, real_labels)
+        with torch.cuda.amp.autocast():
+            sr_images = self.generator(lr_images)
+            fake_preds = self.discriminator(sr_images)
+            content_loss = self.content_loss(sr_images, hr_images)
+            perceptual_loss = self.perceptual_loss(sr_images, hr_images)
+            adversarial_loss = self.adversarial_loss(fake_preds, real_labels)
+            color_loss = F.l1_loss(sr_images, hr_images)
 
         g_loss = (
             self.content_weight * content_loss
             + self.perceptual_weight * perceptual_loss
             + self.adversarial_weight * adversarial_loss
+            + 0.01 * color_loss  # Add color loss with a small weight
         )
-
-        g_loss.backward()
-        self.generator_optimizer.step()
+        self.scaler.scale(g_loss).backward()
+        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
+        self.scaler.step(self.generator_optimizer)
+        self.scaler.update()
 
         return {
             "g_loss": g_loss.item(),
@@ -318,72 +459,206 @@ class EnhanceNetTrainer:
         }
 
 
+def resolve_path(path):
+    """
+    Normalizes UNIX-style file path.
+
+    Args:
+        path: Path object to normalize.
+
+    Returns:
+        Normalized Path object.
+    """
+    parts = path.split("/")
+    resolved = []
+
+    for part in parts:
+        if part == "..":
+            if resolved:
+                resolved.pop()
+        elif part and part != ".":
+            resolved.append(part)
+
+    return "/" + "/".join(resolved)
+
+
+def get_project_root_path():
+    """
+    Returns the root project path as a Path object.
+
+    Returns:
+        Path: Normalized Path object pointing to the project root.
+    """
+    root_dir_path = os.path.join(__file__, "..")
+    root_dir_path = resolve_path(root_dir_path)
+    return root_dir_path
+
+
+def log_message(log_file, message):
+    """
+    Saves out message to txt log file.
+
+    Args:
+        log_file (str or Path):  Path to CSV file.
+        message (str): Message to save to txt log file.
+    """
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(message + "\n")
+
+
+def validate(generator, val_loader, device="cuda"):
+    generator.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for hr_images in val_loader:
+            hr_images = hr_images.to(device)
+            lr_images = F.interpolate(
+                hr_images, size=(128, 128), mode="bicubic", align_corners=False
+            )
+            sr_images = generator(lr_images)
+            loss = F.mse_loss(sr_images, hr_images)
+            total_loss += loss.item() * hr_images.size(0)
+    return total_loss / len(val_loader.dataset)
+
+
+# if __name__ == "__main__":
+#     # Create models
+#     generator = EnhanceNetBase(
+#         in_channels=3,
+#         out_channels=3,
+#         feature_channels=64,
+#         scale_factor=4,  # Scale factor for super-resolution
+#     )
+
+#     discriminator = Discriminator(in_channels=3)
+
+#     # Create trainer
+#     trainer = EnhanceNetTrainer(generator, discriminator, device="cuda")
+
+#     # Dataset and DataLoader
+#     train_transform = transforms.Compose(
+#         [
+#             transforms.Resize((512, 512)),
+#             transforms.RandomHorizontalFlip(),
+#             transforms.RandomRotation(10),
+#             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+#             transforms.ToTensor(),
+#         ]
+#     )
+
+#     train_dataset = DIV2KDataset(
+#         hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_train_HR",
+#         transform=train_transform,
+#     )
+
+#     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+
+#     val_transform = transforms.Compose(
+#         [
+#             transforms.Resize((512, 512)),
+#             transforms.ToTensor(),
+#         ]
+#     )
+
+#     val_dataset = DIV2KDataset(
+#         hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_valid_HR",
+#         transform=val_transform,
+#     )
+
+#     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+
+#     # Training loop
+#     EPOCHS = 100
+#     root_path = get_project_root_path()
+#     txt_log_file = Path(root_path, "ehnahcenet_gan_training_terminal_output.txt")
+
+#     best_loss = float("inf")
+#     patience = 10
+#     counter = 0
+
+#     for epoch in range(EPOCHS):
+#         print(f"Epoch [{epoch + 1}/{EPOCHS}]")
+#         generator.train()
+#         discriminator.train()
+
+#         epoch_losses = {
+#             "g_loss": 0.0,
+#             "d_loss": 0.0,
+#             "content_loss": 0.0,
+#             "perceptual_loss": 0.0,
+#             "adversarial_loss": 0.0,
+#         }
+
+#         for hr_images in tqdm(train_loader, desc="Training"):
+#             # Create low-resolution images (128x128) from high-resolution images (512x512)
+#             lr_images = F.interpolate(
+#                 hr_images, size=(128, 128), mode="bicubic", align_corners=False
+#             )
+
+#             # Train one batch
+#             batch_losses = trainer.train_batch(lr_images, hr_images)
+
+#             # Accumulate losses
+#             for key in epoch_losses:
+#                 epoch_losses[key] += batch_losses[key]
+
+#         # Average losses for the epoch
+#         for key in epoch_losses:
+#             epoch_losses[key] /= len(train_loader)
+
+#         print(
+#             f"Epoch [{epoch + 1}/{EPOCHS}] - "
+#             f"G Loss: {epoch_losses['g_loss']:.4f}, "
+#             f"D Loss: {epoch_losses['d_loss']:.4f}, "
+#             f"Content Loss: {epoch_losses['content_loss']:.4f}, "
+#             f"Perceptual Loss: {epoch_losses['perceptual_loss']:.4f}, "
+#             f"Adversarial Loss: {epoch_losses['adversarial_loss']:.4f}"
+#         )
+
+#         log_message(
+#             txt_log_file,
+#             f"Epoch [{epoch + 1}/{EPOCHS}] - G Loss: {epoch_losses['g_loss']:.4f}, D Loss: {epoch_losses['d_loss']:.4f}, Perceptual Loss: {epoch_losses['perceptual_loss']:.4f}",
+#         )
+
+#         # Check validation loss
+#         val_loss = validate(generator, val_loader)
+#         if val_loss < best_loss:
+#             best_loss = val_loss
+#             counter = 0
+#             torch.save(generator.state_dict(), "best_generator.pth")
+#         # else:
+#         #     counter += 1
+#         #     if counter >= patience:
+#         #         print("Early stopping triggered")
+#         #         break
+
+#     # Save the final model weights
+#     torch.save(generator.state_dict(), "generator_final.pth")
+#     torch.save(discriminator.state_dict(), "discriminator_final.pth")
+#     print("Final model weights saved: generator_final.pth, discriminator_final.pth")
+
 if __name__ == "__main__":
-    # Create models
+    # Define test dataset and DataLoader
+    test_transform = transforms.Compose(
+        [
+            transforms.Resize((512, 512)),  # Resize HR images to 512x512
+            transforms.ToTensor(),
+        ]
+    )
+    test_dataset = DIV2KDataset(
+        hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_valid_HR",
+        transform=test_transform,
+    )
+    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+    # Load trained generator model
     generator = EnhanceNetBase(
         in_channels=3,
         out_channels=3,
         feature_channels=64,
         scale_factor=4,  # Scale factor for super-resolution
     )
+    generator.load_state_dict(torch.load("best_generator.pth"))
 
-    discriminator = Discriminator(in_channels=3)
-
-    # Create trainer
-    trainer = EnhanceNetTrainer(generator, discriminator, device="cuda")
-
-    # Dataset and DataLoader
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((512, 512)),  # Resize HR images to 512x512
-            transforms.ToTensor(),
-        ]
-    )
-
-    train_dataset = DIV2KDataset(
-        hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_train_HR",
-        transform=train_transform,
-    )
-
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-
-    # Training loop
-    EPOCHS = 50
-    for epoch in range(EPOCHS):
-        print(f"Epoch [{epoch + 1}/{EPOCHS}]")
-        generator.train()
-        discriminator.train()
-
-        epoch_losses = {
-            "g_loss": 0.0,
-            "d_loss": 0.0,
-            "content_loss": 0.0,
-            "perceptual_loss": 0.0,
-            "adversarial_loss": 0.0,
-        }
-
-        for hr_images in tqdm(train_loader, desc="Training"):
-            # Create low-resolution images (128x128) from high-resolution images (512x512)
-            lr_images = F.interpolate(
-                hr_images, size=(128, 128), mode="bicubic", align_corners=False
-            )
-
-            # Train one batch
-            batch_losses = trainer.train_batch(lr_images, hr_images)
-
-            # Accumulate losses
-            for key in epoch_losses:
-                epoch_losses[key] += batch_losses[key]
-
-        # Average losses for the epoch
-        for key in epoch_losses:
-            epoch_losses[key] /= len(train_loader)
-
-        print(
-            f"Epoch [{epoch + 1}/{EPOCHS}] - "
-            f"G Loss: {epoch_losses['g_loss']:.4f}, "
-            f"D Loss: {epoch_losses['d_loss']:.4f}, "
-            f"Content Loss: {epoch_losses['content_loss']:.4f}, "
-            f"Perceptual Loss: {epoch_losses['perceptual_loss']:.4f}, "
-            f"Adversarial Loss: {epoch_losses['adversarial_loss']:.4f}"
-        )
+    # Test the model
+    test_enhancenet_gan(generator, test_loader, device="cuda", num_visualizations=5)

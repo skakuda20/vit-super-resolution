@@ -1,0 +1,4 @@
+mode: train # Options: train, test
+img_size: 128
+
+epochs: 200

@@ -104,26 +104,26 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 
-class ResidualBlock(nn.Module):
-    """
-    Residual block for the convolutional part of the network
-    """
+# class ResidualBlock(nn.Module):
+#     """
+#     Residual block for the convolutional part of the network
+#     """
 
-    def __init__(self, channels):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+#     def __init__(self, channels):
+#         super().__init__()
+#         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+#         self.bn1 = nn.BatchNorm2d(channels)
+#         self.relu = nn.ReLU(inplace=True)
+#         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+#         self.bn2 = nn.BatchNorm2d(channels)
 
-    def forward(self, x):
-        residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += residual
-        out = self.relu(out)
-        return out
+#     def forward(self, x):
+#         residual = x
+#         out = self.relu(self.bn1(self.conv1(x)))
+#         out = self.bn2(self.conv2(out))
+#         out += residual
+#         out = self.relu(out)
+#         return out
 
 
 class PixelShuffleUpsampler(nn.Module):
@@ -371,58 +371,6 @@ class VGGPerceptualLoss(nn.Module):
         return features
 
 
-class Discriminator(nn.Module):
-    """
-    Discriminator network for adversarial training
-    """
-
-    def __init__(self, in_channels=3, input_size=512):
-        super().__init__()
-
-        def discriminator_block(in_channels, out_channels, stride=1, batch_norm=True):
-            layers = [
-                nn.Conv2d(
-                    in_channels, out_channels, kernel_size=3, stride=stride, padding=1
-                )
-            ]
-            if batch_norm:
-                layers.append(nn.BatchNorm2d(out_channels))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
-            return layers
-
-        self.model = nn.Sequential(
-            *discriminator_block(in_channels, 64, stride=1, batch_norm=False),
-            *discriminator_block(64, 64, stride=2),
-            *discriminator_block(64, 128, stride=1),
-            *discriminator_block(128, 128, stride=2),
-            *discriminator_block(128, 256, stride=1),  # Removed deeper blocks
-            nn.Flatten(),
-        )
-
-        # Dynamically calculate the flattened size
-        flattened_size = self._get_flattened_size((in_channels, input_size, input_size))
-
-        # Add Linear layers
-        self.fc = nn.Sequential(
-            nn.Linear(flattened_size, 1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1),
-        )
-
-    def _get_flattened_size(self, input_shape):
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, *input_shape)  # Create a dummy input
-            output = self.model(
-                dummy_input
-            )  # Pass through all layers except the Linear layers
-            return output.numel()  # Get the total number of elements
-
-    def forward(self, x):
-        x = self.model(x)
-        x = self.fc(x)
-        return x
-
-
 # Training utilities
 class EnhanceNetViTTrainer:
     """
@@ -597,82 +545,6 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class EnhanceNetBase(nn.Module):
-    """
-    Base EnhanceNet model for super-resolution (without Vision Transformer)
-    """
-
-    def __init__(
-        self, in_channels=3, out_channels=3, feature_channels=64, scale_factor=4
-    ):
-        super().__init__()
-
-        # Initial feature extraction
-        self.initial = nn.Sequential(
-            nn.Conv2d(in_channels, feature_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-        )
-
-        # Residual blocks for local feature extraction
-        self.residual_blocks = nn.Sequential(
-            *[ResidualBlock(feature_channels) for _ in range(8)]  # 8 residual blocks
-        )
-
-        # Upsampling layers
-        self.upsampler = nn.Sequential()
-        log_scale_factor = int(math.log2(scale_factor))
-        for _ in range(log_scale_factor):
-            self.upsampler.add_module(
-                f"upsample_{_}", PixelShuffleUpsampler(feature_channels, scale_factor=2)
-            )
-
-        # Projection layer to match input channels to feature channels
-        self.input_projection = nn.Conv2d(
-            in_channels, feature_channels, kernel_size=3, padding=1
-        )
-
-        # Final output layer
-        self.final = nn.Conv2d(feature_channels, out_channels, kernel_size=3, padding=1)
-
-        # Initialize weights
-        self._init_weights()
-
-    def _init_weights(self):
-        # Initialize convolutional layers
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        # Initial feature extraction
-        initial_features = self.initial(x)
-
-        # Residual blocks
-        res_features = self.residual_blocks(initial_features)
-
-        # Upsampling
-        upsampled = self.upsampler(res_features)
-
-        # Upsample the input to match the size of the upsampled tensor
-        x_upsampled = F.interpolate(
-            x, size=upsampled.shape[-2:], mode="bicubic", align_corners=False
-        )
-
-        # Project input channels to match feature channels
-        x_projected = self.input_projection(x_upsampled)
-
-        # Add skip connection from input to output
-        output = self.final(upsampled + x_projected).clamp(
-            0, 1
-        )  # Clamp output to [0, 1]
-        return output
-
-
 class Discriminator(nn.Module):
     """
     Discriminator network for adversarial training
@@ -778,6 +650,8 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
     total_psnr_sr = 0
     total_psnr_lr = 0
     total_ssim_sr = 0
+    total_lpips = 0
+    total_mse = 0  # Initialize total MSE
     total_samples = 0
     visualized = 0
 
@@ -811,6 +685,9 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
             psnr_lr = 10 * torch.log10(1.0 / mse_lr)
             total_psnr_lr += psnr_lr.item() * hr_images.size(0)
 
+            # Calculate MSE for SR images
+            total_mse += mse_sr.item() * hr_images.size(0)
+
             total_samples += hr_images.size(0)
 
             # Calculate SSIM for SR images
@@ -820,11 +697,12 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
                 sr_image_np, hr_image_np, multichannel=True, win_size=3, data_range=1.0
             )  # Specify data_range=1.0
             total_ssim_sr += ssim_score
+            sr_lpips_score = calculate_lpips(sr_images[0].cpu(), hr_images[0].cpu())
+            total_lpips += sr_lpips_score
             # print(f"SSIM: {ssim_score:.4f}")
 
             # Visualize results
             if visualized < num_visualizations:
-
                 lr_image = TF.to_pil_image(lr_images[0].cpu().clamp(0, 1))
                 hr_image = TF.to_pil_image(hr_images[0].cpu().clamp(0, 1))
                 sr_image = TF.to_pil_image(sr_images[0].cpu().clamp(0, 1))
@@ -869,114 +747,21 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
 
                 plt.show()
                 visualized += 1
+            else:
+                break
 
-    # Calculate average PSNR and SSIM
+    # Calculate average PSNR, SSIM, and MSE
     avg_psnr_sr = total_psnr_sr / total_samples if total_samples > 0 else 0.0
     avg_psnr_lr = total_psnr_lr / total_samples if total_samples > 0 else 0.0
     avg_ssim_sr = total_ssim_sr / total_samples if total_samples > 0 else 0.0
+    avg_mse = total_mse / total_samples if total_samples > 0 else 0.0  # Average MSE
+
+    # Print results
     print(f"Average PSNR (Super-Resolution): {avg_psnr_sr:.2f} dB")
     print(f"Average PSNR (Low-Resolution Upsampled): {avg_psnr_lr:.2f} dB")
     print(f"Average SSIM (Super-Resolution): {avg_ssim_sr:.4f}")
-
-
-class EnhanceNetTrainer:
-    """
-    Trainer for EnhanceNet model with perceptual and adversarial losses
-    """
-
-    def __init__(self, generator, discriminator, device="cuda"):
-        self.device = device
-        self.generator = generator.to(device)
-        self.discriminator = discriminator.to(device)
-
-        # Loss functions
-        self.content_loss = nn.L1Loss().to(device)
-        self.perceptual_loss = VGGPerceptualLoss().to(device)
-        self.adversarial_loss = nn.MSELoss().to(device)  # Use least-squares loss
-
-        # Optimizers
-        self.generator_optimizer = torch.optim.Adam(
-            self.generator.parameters(), lr=2e-4, betas=(0.5, 0.999)
-        )
-        self.discriminator_optimizer = torch.optim.Adam(
-            self.discriminator.parameters(), lr=1e-6, betas=(0.5, 0.999)
-        )
-
-        # Loss weights
-        self.content_weight = 1.0
-        self.perceptual_weight = 0.05
-        self.adversarial_weight = 0.0001
-
-        # Gradient scaler for mixed precision training
-        self.scaler = torch.cuda.amp.GradScaler()
-
-    def train_batch(self, lr_images, hr_images):
-        """
-        Train one batch of data
-
-        Args:
-            lr_images: Low-resolution images (B, C, H, W)
-            hr_images: High-resolution ground truth images (B, C, 4*H, 4*W)
-        """
-        lr_images = lr_images.to(self.device)
-        hr_images = hr_images.to(self.device)
-
-        # Generate SR images
-        sr_images = self.generator(lr_images)
-
-        # Train discriminator
-        self.discriminator_optimizer.zero_grad()
-
-        hr_images = (
-            hr_images + torch.randn_like(hr_images) * 0.01
-        )  # Add noise to real images
-        sr_images = (
-            sr_images + torch.randn_like(sr_images) * 0.01
-        )  # Add noise to fake images
-
-        real_preds = self.discriminator(hr_images)
-        fake_preds = self.discriminator(sr_images.detach())
-
-        real_labels = torch.ones_like(real_preds) * 0.9
-        fake_labels = torch.zeros_like(fake_preds) * 0.1
-
-        d_real_loss = self.adversarial_loss(real_preds, real_labels)
-        d_fake_loss = self.adversarial_loss(fake_preds, fake_labels)
-        d_loss = (d_real_loss + d_fake_loss) / 2
-
-        d_loss.backward()
-        self.discriminator_optimizer.step()
-
-        # Train generator
-        self.generator_optimizer.zero_grad()
-
-        with torch.cuda.amp.autocast():
-            sr_images = self.generator(lr_images)
-            fake_preds = self.discriminator(sr_images)
-            content_loss = self.content_loss(sr_images, hr_images)
-            perceptual_loss = self.perceptual_loss(sr_images, hr_images)
-            adversarial_loss = self.adversarial_loss(fake_preds, real_labels)
-            color_loss = F.l1_loss(sr_images, hr_images)
-
-        g_loss = (
-            self.content_weight * content_loss
-            + self.perceptual_weight * perceptual_loss
-            + self.adversarial_weight * adversarial_loss
-            + 0.01 * color_loss  # Add color loss with a small weight
-        )
-        self.scaler.scale(g_loss).backward()
-        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
-        self.scaler.step(self.generator_optimizer)
-        self.scaler.update()
-
-        return {
-            "g_loss": g_loss.item(),
-            "d_loss": d_loss.item(),
-            "content_loss": content_loss.item(),
-            "perceptual_loss": perceptual_loss.item(),
-            "adversarial_loss": adversarial_loss.item(),
-        }
+    print(f"Average LPIPS (Super-Resolution): {total_lpips / total_samples:.4f}")
+    print(f"Average MSE (Super-Resolution): {avg_mse:.6f}")  # Print average MSE
 
 
 def resolve_path(path):

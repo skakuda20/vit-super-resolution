@@ -1,3 +1,15 @@
+"""
+Module: run.py
+
+This script is used to train and test the EnhanceNet-ViT model for image super-resolution.
+It includes the following functionalities:
+    - Training the model with a dataset of high-resolution images.
+    - Testing the model on a test dataset and visualizing the results.
+    - Saving the best model weights based on validation loss.
+    - Logging training and validation metrics to a text file.
+    - Loading the model weights for testing.
+"""
+
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -21,25 +33,47 @@ from utils import load_config, get_project_root_path, log_message
 
 
 if __name__ == "__main__":
+    root_path = get_project_root_path()
+   
+   # Load configuration
     config = load_config("params.yaml")
     mode = config["mode"]
+    in_channels = config["in_channels"]
+    out_channels = config["out_channels"]
+    feature_channels = config["feature_channels"]
+    embed_dim = config["embed_dim"]
+    transformer_depth = config["transformer_depth"]
+    num_heads = config["num_heads"]
+    scale_factor = config["scale_factor"]
+    img_size = config["img_size"]
+
+    model_weights = config["model_weights"]
+
+    train_dataset = config["train_dataset"]
+    validation_dataset = config["validation_dataset"]
+ 
+    # Set device
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
 
     if mode == "train":
         generator = EnhanceNetViT(
-            in_channels=3,
-            out_channels=3,
-            feature_channels=64,
-            embed_dim=256,
-            transformer_depth=6,
-            num_heads=8,
-            scale_factor=4,
-            img_size=128,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            feature_channels=feature_channels,
+            embed_dim=embed_dim,
+            transformer_depth=transformer_depth,
+            num_heads=num_heads,
+            scale_factor=scale_factor,
+            img_size=img_size,
         )
 
         discriminator = Discriminator(in_channels=3)
 
         # Create trainer
-        trainer = EnhanceNetViTTrainer(generator, discriminator, device="cuda")
+        trainer = EnhanceNetViTTrainer(generator, discriminator, device=device)
 
         # Dataset and DataLoader
         train_transform = transforms.Compose(
@@ -53,7 +87,7 @@ if __name__ == "__main__":
         )
 
         train_dataset = DIV2KDataset(
-            hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_train_HR",
+            hr_dir=train_dataset,
             transform=train_transform,
         )
 
@@ -67,7 +101,7 @@ if __name__ == "__main__":
         )
 
         val_dataset = DIV2KDataset(
-            hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_valid_HR",
+            hr_dir=validation_dataset,
             transform=val_transform,
         )
 
@@ -75,7 +109,6 @@ if __name__ == "__main__":
 
         # Training loop
         epochs = config["epochs"]
-        root_path = get_project_root_path()
         txt_log_file = Path(root_path, "enhancenet_vit_training_terminal_output.txt")
 
         best_loss = float("inf")
@@ -153,27 +186,27 @@ if __name__ == "__main__":
             ]
         )
         test_dataset = DIV2KDataset(
-            hr_dir="/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/data/DIV2K_valid_HR",
+            hr_dir=validation_dataset,
             transform=test_transform,
         )
         test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
         # Load trained generator model
         generator = EnhanceNetViT(
-            in_channels=3,
-            out_channels=3,
-            feature_channels=64,
-            embed_dim=256,
-            transformer_depth=6,
-            num_heads=8,
-            scale_factor=4,
-            img_size=128,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            feature_channels=feature_channels,
+            embed_dim=embed_dim,
+            transformer_depth=transformer_depth,
+            num_heads=num_heads,
+            scale_factor=scale_factor,
+            img_size=img_size,
         )
         generator.load_state_dict(
             torch.load(
-                "/home/kakudas/dev/jhu_705_643_final_project/research/EnhanceNet/src/generator_final_vit.pth"
-            )
+                model_weights,
+                map_location=torch.device(device))
         )
 
         # Test the model
-        test_enhancenet_gan(generator, test_loader, device="cuda", num_visualizations=5)
+        test_enhancenet_gan(generator, test_loader, device=device, num_visualizations=5)

@@ -1,3 +1,8 @@
+"""
+Module: evaluation_metrics.py
+This module contains functions to calculate various evaluation metrics for image super-resolution tasks.
+"""
+
 import torch
 import lpips
 import numpy as np

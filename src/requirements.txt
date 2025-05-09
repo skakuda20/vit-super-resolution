@@ -1,0 +1,8 @@
+torch
+numpy
+PIL
+scipy
+matplotlib
+scikit-image
+scikit-learn
+lpips

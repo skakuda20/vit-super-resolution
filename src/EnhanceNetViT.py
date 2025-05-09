@@ -451,8 +451,6 @@ class EnhanceNetViTTrainer:
             self.discriminator.parameters(), lr=1e-6, betas=(0.5, 0.999)
         )
 
-        # TODO: add learning rate scheduler
-
         # Loss weights
         self.content_weight = 1.0
         self.perceptual_weight = 0.1

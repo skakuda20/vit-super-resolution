@@ -1,6 +1,6 @@
 torch
 numpy
-PIL
+pillow
 scipy
 matplotlib
 scikit-image

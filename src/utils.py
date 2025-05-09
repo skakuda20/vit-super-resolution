@@ -8,16 +8,19 @@ import yaml
 from pathlib import Path
 
 
+import os
+import yaml
+from pathlib import Path
+
 def load_config(config_path="params.yaml"):
     """Load configuration from a YAML file."""
     with open(config_path, "r") as file:
         config = yaml.safe_load(file)
     return config
 
-
 def resolve_path(path):
     """
-    Normalizes UNIX-style file path.
+    Normalizes the file path for both UNIX and Windows systems.
 
     Args:
         path: Path object to normalize.
@@ -25,18 +28,9 @@ def resolve_path(path):
     Returns:
         Normalized Path object.
     """
-    parts = path.split("/")
-    resolved = []
-
-    for part in parts:
-        if part == "..":
-            if resolved:
-                resolved.pop()
-        elif part and part != ".":
-            resolved.append(part)
-
-    return "/" + "/".join(resolved)
-
+    # Use Path from pathlib to handle OS-specific path separators
+    normalized_path = Path(path).resolve()
+    return normalized_path
 
 def get_project_root_path():
     """
@@ -45,9 +39,10 @@ def get_project_root_path():
     Returns:
         Path: Normalized Path object pointing to the project root.
     """
-    root_dir_path = os.path.join(__file__, "..")
-    root_dir_path = resolve_path(root_dir_path)
+    # Get the directory of the current script (__file__) and go one level up
+    root_dir_path = Path(__file__).resolve().parent.parent
     return root_dir_path
+
 
 
 def log_message(log_file, message):

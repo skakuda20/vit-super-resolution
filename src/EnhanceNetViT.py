@@ -258,24 +258,12 @@ class EnhanceNetViT(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        # print(f"Input shape: {x.shape}")
-
-        # Initial feature extraction
         initial_features = self.initial(x)
-        # print(f"Initial features shape: {initial_features.shape}")
-
-        # Residual blocks
         res_features = self.residual_blocks(initial_features)
-        # print(f"Residual features shape: {res_features.shape}")
-
-        # Skip connection
         skip_features = self.skip_conv(res_features)
-        # print(f"Skip features shape: {skip_features.shape}")
 
         # Patch embedding
         patches = self.patch_embed(res_features)
-        # print(f"Patches shape: {patches.shape}")
-        # print(f"Positional embedding shape: {self.pos_embed.shape}")
 
         # Adjust positional embedding to match the number of patches
         if patches.size(1) != self.pos_embed.size(1):
@@ -295,7 +283,6 @@ class EnhanceNetViT(nn.Module):
         # Add positional embedding
         patches = patches + pos_embed[:, : patches.size(1), :]
         transformer_features = self.transformer(patches)
-        # print(f"Transformer features shape: {transformer_features.shape}")
 
         # Reshape transformer output
         batch_size = transformer_features.shape[0]
@@ -309,13 +296,11 @@ class EnhanceNetViT(nn.Module):
         transformer_features = transformer_features.reshape(
             batch_size,
             -1,
-            h_patches,  # This should be 64 instead of 128
-            w_patches,  # This should be 64 instead of 128
+            h_patches,
+            w_patches,
         )
-        # print(f"Reshaped transformer features shape: {transformer_features.shape}")
 
         # Combine with skip features
-        # print(f"Skip features shape: {skip_features.shape}")
         if transformer_features.shape[-2:] != skip_features.shape[-2:]:
             transformer_features = F.interpolate(
                 transformer_features,
@@ -325,15 +310,10 @@ class EnhanceNetViT(nn.Module):
             )
 
         combined_features = transformer_features + skip_features
-        # print(f"Combined features shape: {combined_features.shape}")
 
         # Upsampling
         upsampled = self.upsampler(combined_features)
-        # print(f"Upsampled features shape: {upsampled.shape}")
-
-        # Final output
         output = self.final(upsampled)
-        # print(f"Final output shape: {output.shape}")
 
         return output
 
@@ -406,15 +386,14 @@ class Discriminator(nn.Module):
             *discriminator_block(64, 64, stride=2),
             *discriminator_block(64, 128, stride=1),
             *discriminator_block(128, 128, stride=2),
-            *discriminator_block(128, 256, stride=1),  # Removed deeper blocks
+            *discriminator_block(128, 256, stride=1),
         )
 
         # Global average pooling
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
 
-        # Fully connected layers
         self.fc = nn.Sequential(
-            nn.Linear(256, 512),  # Adjust input size to match the reduced model
+            nn.Linear(256, 512),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(512, 1),
         )
@@ -422,7 +401,7 @@ class Discriminator(nn.Module):
     def forward(self, x):
         x = self.model(x)
         x = self.global_avg_pool(x)
-        x = torch.flatten(x, 1)  # Flatten for fully connected layers
+        x = torch.flatten(x, 1)
         x = self.fc(x)
         return x
 
@@ -488,21 +467,19 @@ class EnhanceNetViTTrainer:
 
         # Train generator
         self.generator_optimizer.zero_grad()
-
-        # Recalculate fake predictions for generator
         fake_preds = self.discriminator(sr_images)
 
         # Calculate losses
         content_loss = self.content_loss(sr_images, hr_images)
         perceptual_loss = self.perceptual_loss(sr_images, hr_images)
         adversarial_loss = self.adversarial_loss(fake_preds, real_labels)
-        color_loss = F.l1_loss(sr_images, hr_images)  # Add color loss
+        color_loss = F.l1_loss(sr_images, hr_images)
 
         g_loss = (
             self.content_weight * content_loss
             + self.perceptual_weight * perceptual_loss
             + self.adversarial_weight * adversarial_loss
-            + 0.1 * color_loss  # Add color loss with a small weight
+            + 0.1 * color_loss
         )
 
         g_loss.backward()
@@ -514,7 +491,7 @@ class EnhanceNetViTTrainer:
             "content_loss": content_loss.item(),
             "perceptual_loss": perceptual_loss.item(),
             "adversarial_loss": adversarial_loss.item(),
-            "color_loss": color_loss.item(),  # Track color loss
+            "color_loss": color_loss.item(),
         }
 
     def validate(self, val_dataloader):
@@ -570,7 +547,7 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
         device (str): Device to run the model on ("cuda" or "cpu").
         num_visualizations (int): Number of images to visualize.
     """
-    generator.eval()  # Set the generator to evaluation mode
+    generator.eval()
     generator.to(device)
 
     total_psnr_sr = 0
@@ -588,10 +565,8 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
                 hr_images, size=(128, 128), mode="bicubic", align_corners=False
             )
 
-            # Generate super-resolution images
             sr_images = generator(lr_images)
 
-            # Upsample LR images back to HR size for comparison
             lr_upsampled = F.interpolate(
                 lr_images,
                 size=hr_images.shape[-2:],
@@ -616,9 +591,8 @@ def test_enhancenet_gan(generator, test_loader, device="cuda", num_visualization
             hr_image_np = hr_images[0].cpu().numpy().transpose(1, 2, 0)
             ssim_score = ssim(
                 sr_image_np, hr_image_np, multichannel=True, win_size=3, data_range=1.0
-            )  # Specify data_range=1.0
+            )
             total_ssim_sr += ssim_score
-            # print(f"SSIM: {ssim_score:.4f}")
 
             # Visualize results
             if visualized < num_visualizations:

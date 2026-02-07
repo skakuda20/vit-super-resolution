@@ -1,0 +1,25 @@
+mode: test # Options: train, test
+
+# Model parameters
+img_size: 128
+in_channels: 3
+out_channels: 3
+feature_channels: 64
+embed_dim: 256
+transformer_depth: 6
+num_heads: 8
+scale_factor: 4
+img_size: 128
+
+# Training parameters
+batch_size: 16
+g_learning_rate: 2e-4 # Generator learning rate
+d_learning_rate: 1e-6 # Discriminator learning rate
+epochs: 200
+
+# Test parameters
+model_weights: '/home/kakudas/dev/jhu_705_643_final_project/models/generator_final_vit.pth'
+
+# Data parameters
+train_dataset: '/home/kakudas/dev/jhu_705_643_final_project/research/data/DIV2K_train_HR'
+validation_dataset: '/home/kakudas/dev/jhu_705_643_final_project/research/data/DIV2K_valid_HR'
